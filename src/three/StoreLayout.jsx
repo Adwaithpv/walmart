@@ -1,5 +1,9 @@
-import { useMemo } from 'react';
+import { useMemo, useEffect, useState } from 'react';
 import { Box } from '@react-three/drei';
+import { products } from '../products.js';
+import { TextureLoader } from 'three';
+import { useLoader } from '@react-three/fiber';
+import { Html } from '@react-three/drei';
 
 // Department colors
 const DEPARTMENT_COLORS = [
@@ -29,7 +33,27 @@ const AISLE_LENGTH = 24;
 const SUPPORT_WIDTH = 0.12;
 const PRODUCT_BOXES_PER_SHELF = 8;
 
-function Aisle({ x, color }) {
+function ProductBox({ product, position, showPrompt }) {
+  const texture = useLoader(TextureLoader, product.image);
+  return (
+    <group position={position}>
+      <Box args={[0.35, 0.5, 0.35]}>
+        <meshStandardMaterial map={texture} />
+      </Box>
+      {showPrompt && (
+        <Html center style={{ pointerEvents: 'none' }} position={[0, 0.4, 0]}>
+          <div style={{
+            background: 'rgba(0,0,0,0.85)', color: '#fff', padding: '4px 12px', borderRadius: 8, fontSize: 16, fontWeight: 600, boxShadow: '0 2px 8px #0006', whiteSpace: 'nowrap'
+          }}>
+            Press E to view product
+          </div>
+        </Html>
+      )}
+    </group>
+  );
+}
+
+function Aisle({ x, color, aisleIdx, playerPos, nearestProductId }) {
   // Main vertical supports (4 corners)
   const supports = [
     [x - AISLE_WIDTH / 2 + SUPPORT_WIDTH / 2, 1.5, -AISLE_LENGTH / 2 + SUPPORT_WIDTH / 2],
@@ -52,20 +76,23 @@ function Aisle({ x, color }) {
       <meshStandardMaterial color="#e0e0e0" metalness={0.2} roughness={0.7} />
     </Box>
   ));
-  // Products (colored boxes on shelves)
-  const products = SHELF_HEIGHTS.flatMap((y, shelfIdx) => (
-    Array.from({ length: PRODUCT_BOXES_PER_SHELF }).map((_, i) => {
+  // Products for this aisle
+  const aisleProducts = products.filter(p => p.aisleIndex === aisleIdx);
+  const productBoxes = SHELF_HEIGHTS.flatMap((y, shelfIdx) => (
+    aisleProducts.slice(shelfIdx * PRODUCT_BOXES_PER_SHELF, (shelfIdx + 1) * PRODUCT_BOXES_PER_SHELF).map((product, i) => {
       const px = x - AISLE_WIDTH / 2 + 0.25 + (i * (AISLE_WIDTH - 0.5)) / (PRODUCT_BOXES_PER_SHELF - 1);
-      const pz = -AISLE_LENGTH / 2 + 1.2 + (shelfIdx % 2 ? 0.2 : -0.2); // alternate z for realism
+      const pz = -AISLE_LENGTH / 2 + 1.2 + (shelfIdx % 2 ? 0.2 : -0.2);
       const pzStep = (AISLE_LENGTH - 2.4) / (PRODUCT_BOXES_PER_SHELF - 1);
+      const pos = [px, y + 0.22, pz + i * pzStep];
+      const dist = playerPos ? Math.sqrt((playerPos[0] - pos[0]) ** 2 + (playerPos[2] - pos[2]) ** 2) : 999;
+      const showPrompt = product.id === nearestProductId && dist < 1.2;
       return (
-        <Box
-          key={y + '-' + i}
-          args={[0.22, 0.32, 0.22]}
-          position={[px, y + 0.22, pz + i * pzStep]}
-        >
-          <meshStandardMaterial color={DEPARTMENT_COLORS[color]} metalness={0.1} roughness={0.5} />
-        </Box>
+        <ProductBox
+          key={product.id}
+          product={product}
+          position={pos}
+          showPrompt={showPrompt}
+        />
       );
     })
   ));
@@ -85,25 +112,78 @@ function Aisle({ x, color }) {
       ))}
       {/* Shelves */}
       {shelves}
-      {/* Products */}
-      {products}
+      {/* Real product boxes */}
+      {productBoxes}
     </group>
   );
 }
 
-export default function StoreLayout() {
+export default function StoreLayout({ onProductProximity }) {
+  const [playerPos, setPlayerPos] = useState([0, 0, 0]);
+  const [nearestProduct, setNearestProduct] = useState(null);
+
+  // Track player position from Controls
+  useEffect(() => {
+    const update = () => {
+      const pos = window.__CHAR_POS__;
+      if (pos) setPlayerPos(pos);
+      requestAnimationFrame(update);
+    };
+    update();
+    return () => {};
+  }, []);
+
+  // Find nearest product within 1.2 units
+  useEffect(() => {
+    let minDist = 1.2;
+    let nearest = null;
+    products.forEach(product => {
+      // Find product's 3D position
+      const aisleIdx = product.aisleIndex;
+      const aisle = AISLES[aisleIdx];
+      let found = false;
+      SHELF_HEIGHTS.forEach((y, shelfIdx) => {
+        const idx = products.filter(p => p.aisleIndex === aisleIdx).indexOf(product);
+        if (idx >= 0) {
+          const i = idx % PRODUCT_BOXES_PER_SHELF;
+          const px = aisle.x - AISLE_WIDTH / 2 + 0.25 + (i * (AISLE_WIDTH - 0.5)) / (PRODUCT_BOXES_PER_SHELF - 1);
+          const pz = -AISLE_LENGTH / 2 + 1.2 + (shelfIdx % 2 ? 0.2 : -0.2);
+          const pzStep = (AISLE_LENGTH - 2.4) / (PRODUCT_BOXES_PER_SHELF - 1);
+          const pos = [px, y + 0.22, pz + i * pzStep];
+          const dist = Math.sqrt((playerPos[0] - pos[0]) ** 2 + (playerPos[2] - pos[2]) ** 2);
+          if (dist < minDist) {
+            minDist = dist;
+            nearest = { ...product, pos };
+            found = true;
+          }
+        }
+      });
+      if (found) return;
+    });
+    setNearestProduct(nearest);
+  }, [playerPos]);
+
+  // Listen for E key
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.code === 'KeyE' && nearestProduct) {
+        onProductProximity(nearestProduct);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [nearestProduct, onProductProximity]);
+
   // Floor
   const floor = useMemo(() => (
     <Box args={[40, 0.5, 30]} position={[10, -0.25, 0]}>
       <meshStandardMaterial color="#e0e0e0" />
     </Box>
   ), []);
-
   // Aisles
   const aisles = useMemo(() => (
-    AISLES.map((aisle, i) => <Aisle key={i} x={aisle.x} color={aisle.color} />)
-  ), []);
-
+    AISLES.map((aisle, i) => <Aisle key={i} x={aisle.x} color={aisle.color} aisleIdx={i} playerPos={playerPos} nearestProductId={nearestProduct?.id} />)
+  ), [playerPos, nearestProduct]);
   return (
     <group>
       {floor}
